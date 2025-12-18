@@ -1,0 +1,94 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKERHUB_CREDENTIALS = credentials('dockerhub-creds')
+        SONARQUBE_SCANNER_HOME = tool 'SonarScanner'
+        IMAGE_NAME = "dockerhubuser/devops-cicd-sample-service"
+        // Use a simple timestamp as tag for now, or git commit hash
+        IMAGE_TAG = "${BUILD_NUMBER}" 
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                dir('src') {
+                    sh 'npm install'
+                }
+            }
+        }
+
+        stage('Unit Tests') {
+            steps {
+                dir('src') {
+                    sh 'npm test'
+                }
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                dir('src') {
+                    script {
+                        def scannerHome = tool 'SonarScanner'
+                        withSonarQubeEnv('SonarQube') {
+                            sh "${scannerHome}/bin/sonar-scanner" // Assumes sonar-project.properties is in src/ or configured here
+                        }
+                    }
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                dir('src') {
+                    script {
+                        dockerImage = docker.build("${IMAGE_NAME}:${IMAGE_TAG}")
+                    }
+                }
+            }
+        }
+
+        stage('Trivy Image Scan') {
+            steps {
+                sh "trivy image --exit-code 0 --severity LOW,MEDIUM,HIGH ${IMAGE_NAME}:${IMAGE_TAG}"
+                sh "trivy image --exit-code 1 --severity CRITICAL ${IMAGE_NAME}:${IMAGE_TAG}"
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                script {
+                    docker.withRegistry('', 'dockerhub-creds') {
+                        dockerImage.push()
+                        dockerImage.push('latest')
+                    }
+                }
+            }
+        }
+
+        stage('Update K8s Manifests') {
+            steps {
+                script {
+                    // Logic to update the deployment.yaml with the new image tag
+                    // This typically involves checking out the manifest repo (often same repo), editing file, committing and pushing.
+                    // Simplified here for demonstration
+                    sh """
+                        sed -i 's|image: .*|image: ${IMAGE_NAME}:${IMAGE_TAG}|' k8s/deployment.yaml
+                        git config user.email "jenkins@example.com"
+                        git config user.name "Jenkins CI"
+                        git add k8s/deployment.yaml
+                        git commit -m "Update image to ${IMAGE_TAG}"
+                        // git push origin HEAD:main // Uncomment in real setup
+                    """
+                }
+            }
+        }
+    }
+}
